@@ -2,12 +2,20 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Ethernet.h>
+#include <EthernetUdp.h>
 #include <ArduinoJson.h>
 #include <pthread.h>
+#include <PubSubClient.h>
 #define E32_TTL_1W
 #include <LoRa_E32.h>
+#include <MCP23017.h>
+#include <ModbusMaster.h>
 
+#include <Dns.h>       // DNSClient
 #include <Update.h>
+#include "esp_ota_ops.h"
+#include <RTClib.h>
 #include <Firebase_ESP_Client.h>  // Firebase
 #include "addons/TokenHelper.h"   // Firebase Provide the token generation process info.
 
@@ -30,27 +38,39 @@ using namespace std;
 #include <Wire.h>
 
 //To Ebyte
-#define pinToM0_Ebyte GPIO_NUM_26
-#define pinToM1_Ebyte GPIO_NUM_27
-#define pinToRX_Ebyte GPIO_NUM_9
-#define pinToTX_Ebyte GPIO_NUM_10
-#define pinToAux_Ebyte GPIO_NUM_14
+#define pinToM0_Ebyte GPIO_NUM_4
+#define pinToM1_Ebyte GPIO_NUM_17
+#define pinToRX_Ebyte GPIO_NUM_25
+#define pinToTX_Ebyte GPIO_NUM_26
+#define pinToAux_Ebyte GPIO_NUM_34
 
-#define OUT GPIO_NUM_19
+//#define OUT GPIO_NUM_19
 
 //To Config
-#define CONFIG GPIO_NUM_23
+#define CONFIG GPIO_NUM_16
 
 //To Input
-#define IN0 GPIO_NUM_35
-#define IN1 GPIO_NUM_34
-#define IN2 GPIO_NUM_39
+#define IN0 0
+#define IN1 1
+#define IN2 2
+
+//To RS 485
+#define pinTo_RE_DE_485 GPIO_NUM_33
+#define pinTo_RO_485 GPIO_NUM_27
+#define pinTo_DI_485 GPIO_NUM_32
+
+#define DI6 39  // I7
+#define DI7 36  // I8
+
+#define ETH_CS 13
+#define ETH_RST 14
+
+#define ETH_SCK 18
+#define ETH_MISO 19
+#define ETH_MOSI 23
 
 //To LED
-#define pinToLED01 GPIO_NUM_2   //LED BRANCO
-#define pinToLED02 GPIO_NUM_32  //LED VERDE
-#define pinToLED03 GPIO_NUM_25  //LED AZUL
-#define pinToLED04 GPIO_NUM_33  //LED AMARELO
+#define pinToLED01 GPIO_NUM_2   //LED
 
 // To serial
 #define SERIAL_FREQ 115200
@@ -67,6 +87,16 @@ String _DEVICE_NAME_BLE = "MÓDULO SC-RPT V1.0";
 #endif
 
 #define EEPROM_SIZE 1024
+
+#define MCP23017_ADDR 0x20
+MCP23017 mcp = MCP23017(MCP23017_ADDR);
+
+bool _BIT_OUT[8];
+bool _BIT_IN[8];
+
+#define _OUT_ 0
+
+SemaphoreHandle_t mcpLock = NULL;
 
 String _SENSOR_NAME = "";
 String _SENSOR_VALUE_UTC = "";
@@ -88,6 +118,8 @@ bool enableRushHour = false;
 
 TaskHandle_t thLedUpdateHandle = NULL;
 
+void setLED(void* arg);
+void mcpRegister(void* arg);
 void confirmDevice(void* arg);
 static bool readLineFromUart(Stream& uart, char* buf, uint16_t bufSize, uint32_t timeoutMs);;
 void checkUpdateOnFirebaseWifi();
@@ -317,7 +349,7 @@ uint16_t _HYDRO_TAIL = 0;
 String pathHTTPClient = "http://200.98.81.127:3000/";  //PRODUÇÃO
 //String pathHTTPClient = "http://localhost:3000/"; //DESENVOLVIMENTO LOCAL
 
-#define FIRMWARE_VERSION "1.12.109"
+#define FIRMWARE_VERSION "2.0.1"
 const char FIRMWARE_VERSION_DATA[] = "SC-FW-VERSION:" FIRMWARE_VERSION;
 
 String _MODEL = "RPT";
@@ -1087,13 +1119,76 @@ void stopLED() {
   if (setLEDHandle) {
     vTaskDelete(setLEDHandle);  // NÃO pode ser chamado de ISR
     setLEDHandle = nullptr;
-    ledcWrite(0, 0);
+    digitalWrite(pinToLED01, 0);
   }
+}
+
+void mcpRegister(void* args) {
+
+  (void)args;
+
+  uint8_t _last_value = 0, loop = 0;
+
+  for (;;) {
+
+    uint8_t _current_value = 0;
+
+    for (uint8_t i = 0; i < 8; ++i) {
+      if (_BIT_OUT[i]) _current_value |= (1u << i);
+    }
+
+    if (_current_value != _last_value) {
+      const int MAX_RETRY = 5;
+      const int RETRY_DELAY_MS = 5;
+      bool written = false;
+
+      // Protege o barramento I2C/MCP enquanto tentamos escrever/verificar
+      if (mcpLock) xSemaphoreTake(mcpLock, portMAX_DELAY);
+
+      for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
+        mcp.writeRegister(MCP23017Register::GPIO_B, _current_value);  // ESCRITA
+
+        delay(RETRY_DELAY_MS);
+
+        uint8_t v = mcp.readRegister(MCP23017Register::GPIO_B);
+
+        if (v == _current_value) {
+          toPrint("[MCP] write verify success\n");
+          _last_value = _current_value;
+          written = true;
+          break;
+        }
+      }
+
+      if (!written) {
+        toPrint("[ERR] mcpRegister: write verify failed. expected=0x - ");
+        toPrint(String(_current_value, HEX));
+        toPrint("\tlastread=0x");
+        toPrint(String(mcp.readRegister(MCP23017Register::GPIO_B), HEX) + "\n");
+      }
+
+      if (mcpLock) xSemaphoreGive(mcpLock);
+    }
+
+    uint8_t _value_in = mcp.readRegister(MCP23017Register::GPIO_A);
+
+    for (uint8_t i = 0; i < 8; ++i) {
+      _BIT_IN[i] = (_value_in >> i) & 0x01;
+    }
+
+    if (digitalRead(DI6) == 1) { _BIT_IN[6] = 1; } else { _BIT_IN[6] = 0; }
+
+    if (digitalRead(DI7) == 1) { _BIT_IN[7] = 1; } else { _BIT_IN[7] = 0; }
+
+    delay(100);
+  }
+
+  vTaskDelete(NULL);
 }
 
 void setLED(void* arg) {
   for (;;) {
-    _ACTIVITY ? ledcWrite(0, 0) : ledcWrite(0, 24);
+    _ACTIVITY ? digitalWrite(pinToLED01, 1) : digitalWrite(pinToLED01, 0);
     _ACTIVITY = !_ACTIVITY;
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -1412,10 +1507,8 @@ void commandBT(std::string command) {
       xTaskCreate(confirmDevice, "confirmDevice", 2048, NULL, 1, NULL);
     } else if (list[2] == 0x18) {
       ledcWrite(1, 24);
-      //digitalWrite(pinToLED02,  1 );
     } else if (list[2] == 0x19) {
       ledcWrite(1, 0);
-      //digitalWrite(pinToLED02,  0 );
     } else if (list[2] == 0x20) {
       EEPROM.write(0, list[1]);
       _NETWORK = "";
@@ -1780,15 +1873,15 @@ void triggering(void* arg) {
 
     //Serial.println("SEM VÍNCULO COM CHAVE......");
 
-    digitalWrite(OUT, 1);
-    ledcWrite(1, 24);
-    //digitalWrite(pinToLED02,  1 );
+    _BIT_OUT[_OUT_] = 1;
+    // digitalWrite(OUT, 1);
+    // ledcWrite(1, 24);
 
     while (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == false) { delay(100); }  // ENQUANTO ESTIVER SEM BOMBEAMENTO...
 
-    digitalWrite(OUT, 0);
-    ledcWrite(1, 0);
-    //digitalWrite(pinToLED02,  0 );
+    _BIT_OUT[_OUT_] = 0;
+    // digitalWrite(OUT, 0);
+    // ledcWrite(1, 0);
   }
 
   if (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == true) {  // COM VÍNCULO COM CHAVE
@@ -1797,7 +1890,7 @@ void triggering(void* arg) {
 
     do {
 
-      while (digitalRead(IN1) == 1 && _ENABLE_COUNTING == true) {
+      while (_BIT_IN[IN1] == 1 && _ENABLE_COUNTING == true) {
         delay(100);
         Serial.print(".");
       }  // ENQUANTO ESTIVER COM RESERVATORIO CHEIO...
@@ -1806,7 +1899,7 @@ void triggering(void* arg) {
 
       _c_time = 0;
 
-      while (digitalRead(IN1) == 0 && readyToTurnOn == false && _ENABLE_COUNTING == true) {
+      while (_BIT_IN[IN1] == 0 && readyToTurnOn == false && _ENABLE_COUNTING == true) {
 
         Serial.print(_c_time);
         Serial.print(", ");
@@ -1834,19 +1927,19 @@ void triggering(void* arg) {
 
     Serial.println("");
 
-    digitalWrite(OUT, 1);
-    ledcWrite(1, 24);
-    //digitalWrite(pinToLED02,  1 );
+    _BIT_OUT[_OUT_] = 1;
+    // digitalWrite(OUT, 1);
+    // ledcWrite(1, 24);
 
     while (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == true) {
 
-      while (digitalRead(IN1) == 1 && _ENABLE_COUNTING == true) {
+      while (_BIT_IN[IN1] == 1 && _ENABLE_COUNTING == true) {
 
         delay(100);
 
-        digitalWrite(OUT, 0);
-        ledcWrite(1, 0);
-        //digitalWrite(pinToLED02, 0 );
+        _BIT_OUT[_OUT_] = 0;
+        // digitalWrite(OUT, 0);
+        // ledcWrite(1, 0);
 
         Serial.print(".");
 
@@ -1857,7 +1950,7 @@ void triggering(void* arg) {
       _c_time = 0;
       readyToTurnOn = false;
 
-      while (digitalRead(IN1) == 0 && readyToTurnOn == false && _ENABLE_COUNTING == true) {  // ENQUANDO ESTIVER BOMBEANDO...
+      while (_BIT_IN[IN1] == 0 && readyToTurnOn == false && _ENABLE_COUNTING == true) {  // ENQUANDO ESTIVER BOMBEANDO...
 
         Serial.print(_c_time);
         Serial.print(", ");
@@ -1874,17 +1967,17 @@ void triggering(void* arg) {
 
       if (readyToTurnOn == true && _ENABLE_COUNTING == true) {
 
-        digitalWrite(OUT, 1);
-        ledcWrite(1, 24);
-        //digitalWrite(pinToLED02,  1 );
+        _BIT_OUT[_OUT_] = 1;
+        // digitalWrite(OUT, 1);
+        // ledcWrite(1, 24);
       }
     }
 
     if (_VISIBLE_CH_RELAY == false) {  //EM CASO DE DESATIVAR COM VÍNCULO, DESLIGAR O SISTEMA
 
-      digitalWrite(OUT, 0);
-      ledcWrite(1, 0);
-      //digitalWrite(pinToLED02, 0 );
+      _BIT_OUT[_OUT_] = 0;
+      // digitalWrite(OUT, 0);
+      // ledcWrite(1, 0);
       _ENABLE_COUNTING = false;  //DESATIVAR QUALQUER SERVIÇO DE MONITORAMENTO, FALHA FUNCIONAMENTO, GPS, DENTRE OUTROS.....
     }
   }
@@ -1898,26 +1991,13 @@ void triggering(void* arg) {
 
 void updateIDevice(String iDevice) {
   if (iDevice == "l") {
-    digitalWrite(OUT, 1);
-    ledcWrite(1, 24);
-    //digitalWrite(pinToLED02,  1 );
-
-    /*
-    if ( _PERMISSION_TRIGERING == true ) {
-
-      Serial.println("THREAD START...");
-
-      //xTaskCreatePinnedToCore(triggering, "triggering", 2048, NULL, 4, NULL, PRO_CPU_NUM);
-    
-      _PERMISSION_TRIGERING = false;
-
-    }
-    */
-
+    _BIT_OUT[_OUT_] = 1;
+    // digitalWrite(OUT, 1);
+    // ledcWrite(1, 24);
   } else if (iDevice == "d" || iDevice == "null") {
-    digitalWrite(OUT, 0);
-    ledcWrite(1, 0);
-    //digitalWrite(pinToLED02, 0 );
+    _BIT_OUT[_OUT_] = 0;
+    // digitalWrite(OUT, 0);
+    // ledcWrite(1, 0);
   }
 }
 
@@ -1963,30 +2043,39 @@ void pinInit() {
 
   Serial.begin(115200);
 
-  ledcSetup(0, 5000, 8);
-  ledcAttachPin(pinToLED01, 0);  // PWM CANAL 0
-  ledcWrite(0, 0);
+  pinMode(pinToLED01, OUTPUT);
+  digitalWrite(pinToLED01, 0);
 
-  ledcSetup(1, 5000, 8);
-  ledcAttachPin(pinToLED02, 1);  // PWM CANAL 1
-  ledcWrite(1, 0);
-
-  pinMode(pinToLED03, OUTPUT);
-  pinMode(pinToLED04, OUTPUT);
-
-  //To Relay
-  pinMode(OUT, OUTPUT);
-
-  digitalWrite(pinToLED03, 0);
-  digitalWrite(pinToLED04, 0);
-
-  //To Config
   pinMode(CONFIG, INPUT_PULLUP);
+  pinMode(pinToM0_Ebyte, OUTPUT);
+  pinMode(pinToM1_Ebyte, OUTPUT);
+  pinMode(pinToAux_Ebyte, INPUT_PULLUP);
 
-  //To Input
-  pinMode(IN0, INPUT);
-  pinMode(IN1, INPUT);
-  pinMode(IN2, INPUT);
+  pinMode(DI6, INPUT);
+  pinMode(DI7, INPUT);
+
+  pinMode(pinTo_RE_DE_485, OUTPUT);
+  digitalWrite(pinTo_RE_DE_485, LOW);
+
+  Wire.begin();
+  mcp.init();
+  mcp.portMode(MCP23017Port::A, 0b11111111);          //PORTA A COMO ENTRADA
+  mcp.portMode(MCP23017Port::B, 0);                   //PORTA B COMO SAÍDA
+  mcp.writeRegister(MCP23017Register::GPIO_A, 0x00);  //Reset port A
+  mcp.writeRegister(MCP23017Register::GPIO_B, 0x00);  //Reset port B
+
+  for (int i = 0; i < 8; i++) {
+    _BIT_OUT[i] = 0;
+    _BIT_IN[i] = 0;
+  }
+
+  // cria mutex para proteger I2C/MCP durante escritas/verificações
+  mcpLock = xSemaphoreCreateMutex();
+  if (mcpLock == NULL) {
+    Serial.println("[ERR] falha ao criar mcpLock");
+  }
+
+  xTaskCreate(mcpRegister, "mcpRegister", 4096, NULL, 1, NULL);
 
   //
   EEPROM.begin(EEPROM_SIZE);
@@ -2200,14 +2289,12 @@ void sendMessage() {
     return;
   }
 
-  digitalWrite(pinToLED04, HIGH);
-
   String message = "91,";
   message += String(FIRMWARE_VERSION);
   message += ",";
-  (digitalRead(IN0)) ? message += "1," : message += "0,";
-  (digitalRead(IN1)) ? message += "1," : message += "0,";
-  (digitalRead(IN2)) ? message += "1" : message += "0";
+  (_BIT_IN[IN0] == 1) ? message += "1," : message += "0,";
+  (_BIT_IN[IN1] == 1) ? message += "1," : message += "0,";
+  (_BIT_IN[IN2] == 1) ? message += "1" : message += "0";
   message += "\n";
 
   ResponseStatus rs = e32ttl->sendFixedMessage(_ADDH, _ADDL, channel, message);
@@ -2220,7 +2307,6 @@ void sendMessage() {
     Serial.println(rs.getResponseDescription());
   }
 
-  digitalWrite(pinToLED04, LOW);
 }
 
 void ledUpdate(void* arg) {
@@ -2261,9 +2347,7 @@ void ledSend(void* arg) {
 
   (void)arg;
 
-  digitalWrite(pinToLED04, HIGH);
   vTaskDelay(pdMS_TO_TICKS(100));
-  digitalWrite(pinToLED04, LOW);
 
   vTaskDelete(NULL);
 }
@@ -2272,9 +2356,9 @@ void ledRead(void* arg) {
 
   (void)arg;
 
-  digitalWrite(pinToLED03, HIGH);
+  digitalWrite(pinToLED01, 1);
   vTaskDelay(pdMS_TO_TICKS(100));
-  digitalWrite(pinToLED03, LOW);
+  digitalWrite(pinToLED01, 0);
 
   vTaskDelete(NULL);
 }
@@ -2324,9 +2408,9 @@ void sendE32() {
     message = "91,";
     message += String(FIRMWARE_VERSION);
     message += ",";
-    (digitalRead(IN0)) ? message += "1," : message += "0,";
-    (digitalRead(IN1)) ? message += "1," : message += "0,";
-    (digitalRead(IN2)) ? message += "1," : message += "0,";
+    (_BIT_IN[IN0] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN1] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN2] == 1) ? message += "1," : message += "0,";
     message += String(_CURRENT_HYDROMETER_PULSES_PER_M3);
     message += ",";
     message += String(_CURRENT_HYDROMETER, 2);
@@ -2459,13 +2543,13 @@ void hydrometer(void* arg) {
     WAIT_NEXT_RISING
   };
 
-  bool lastState = digitalRead(IN2);
+  bool lastState = _BIT_IN[IN2];
 
   uint8_t state = lastState ? WAIT_FALLING : WAIT_NEXT_RISING;
 
   for (;;) {
 
-    bool currentState = digitalRead(IN2);
+    bool currentState = _BIT_IN[IN2];
 
     if (_CURRENT_HYDROMETER_PULSES_PER_M3 <= 0) {
       //Serial.print(".");  //Forçar ficar aqui até que _CURRENT_HYDROMETER_PULSES_PER_M3 receba algum valor
@@ -2607,7 +2691,6 @@ void loop() {
 }
 
 void checkUpdateOnFirebaseWifi() {
-
   string _deviceDB = deviceDB;
   _deviceDB.erase(remove(_deviceDB.begin(), _deviceDB.end(), ':'), _deviceDB.end());
   string _STR = "SC";
@@ -2635,19 +2718,14 @@ void checkUpdateOnFirebaseWifi() {
 
     Serial.println("\nChecking for new firmware update available...\n");
 
-    if (!Firebase.Storage.downloadOTA(
-          &fbdo, STORAGE_BUCKET_ID,
-          FIRMWARE_PATH,
-          fcsDownloadCallback)) {
+    if (!Firebase.Storage.downloadOTA(&fbdo, STORAGE_BUCKET_ID, FIRMWARE_PATH, fcsDownloadCallback)) {
       Serial.println(fbdo.errorReason());
     } else {  // Delete the file after update
       Serial.printf("Delete file... %s\n", Firebase.Storage.deleteFile(&fbdo, STORAGE_BUCKET_ID, FIRMWARE_PATH) ? "ok" : fbdo.errorReason().c_str());
       Serial.println("Restarting...\n\n");
-      digitalWrite(pinToLED03, 1);
       EEPROM.write(449, 1);
       EEPROM.commit();
       delay(2000);
-      digitalWrite(pinToLED03, 0);
       ESP.restart();
     }
   }
