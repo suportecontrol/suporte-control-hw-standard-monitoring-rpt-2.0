@@ -1485,9 +1485,9 @@ void confirmDevice(void* arg) {
   (void)arg;
 
   for (int i = 0; i < 3; i++) {
-    ledcWrite(1, 24);
+    digitalWrite(pinToLED01, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
-    ledcWrite(1, 0);
+    digitalWrite(pinToLED01, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 
@@ -1506,9 +1506,9 @@ void commandBT(std::string command) {
     if (list[2] == 0x17) {
       xTaskCreate(confirmDevice, "confirmDevice", 2048, NULL, 1, NULL);
     } else if (list[2] == 0x18) {
-      ledcWrite(1, 24);
+      digitalWrite(pinToLED01, 1);
     } else if (list[2] == 0x19) {
-      ledcWrite(1, 0);
+      digitalWrite(pinToLED01, 0);
     } else if (list[2] == 0x20) {
       EEPROM.write(0, list[1]);
       _NETWORK = "";
@@ -1874,14 +1874,10 @@ void triggering(void* arg) {
     //Serial.println("SEM VÍNCULO COM CHAVE......");
 
     _BIT_OUT[_OUT_] = 1;
-    // digitalWrite(OUT, 1);
-    // ledcWrite(1, 24);
 
     while (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == false) { delay(100); }  // ENQUANTO ESTIVER SEM BOMBEAMENTO...
 
     _BIT_OUT[_OUT_] = 0;
-    // digitalWrite(OUT, 0);
-    // ledcWrite(1, 0);
   }
 
   if (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == true) {  // COM VÍNCULO COM CHAVE
@@ -1928,8 +1924,6 @@ void triggering(void* arg) {
     Serial.println("");
 
     _BIT_OUT[_OUT_] = 1;
-    // digitalWrite(OUT, 1);
-    // ledcWrite(1, 24);
 
     while (_ENABLE_COUNTING == true && _VISIBLE_CH_RELAY == true) {
 
@@ -1938,8 +1932,6 @@ void triggering(void* arg) {
         delay(100);
 
         _BIT_OUT[_OUT_] = 0;
-        // digitalWrite(OUT, 0);
-        // ledcWrite(1, 0);
 
         Serial.print(".");
 
@@ -1968,16 +1960,12 @@ void triggering(void* arg) {
       if (readyToTurnOn == true && _ENABLE_COUNTING == true) {
 
         _BIT_OUT[_OUT_] = 1;
-        // digitalWrite(OUT, 1);
-        // ledcWrite(1, 24);
       }
     }
 
     if (_VISIBLE_CH_RELAY == false) {  //EM CASO DE DESATIVAR COM VÍNCULO, DESLIGAR O SISTEMA
 
       _BIT_OUT[_OUT_] = 0;
-      // digitalWrite(OUT, 0);
-      // ledcWrite(1, 0);
       _ENABLE_COUNTING = false;  //DESATIVAR QUALQUER SERVIÇO DE MONITORAMENTO, FALHA FUNCIONAMENTO, GPS, DENTRE OUTROS.....
     }
   }
@@ -1992,12 +1980,8 @@ void triggering(void* arg) {
 void updateIDevice(String iDevice) {
   if (iDevice == "l") {
     _BIT_OUT[_OUT_] = 1;
-    // digitalWrite(OUT, 1);
-    // ledcWrite(1, 24);
   } else if (iDevice == "d" || iDevice == "null") {
     _BIT_OUT[_OUT_] = 0;
-    // digitalWrite(OUT, 0);
-    // ledcWrite(1, 0);
   }
 }
 
@@ -2095,6 +2079,7 @@ void pinInit() {
   _FIRST_LD = true;
 
   delay(1000);
+
 }
 
 void bluetoothLESetup(void) {
@@ -2201,8 +2186,6 @@ void printParameters(struct Configuration configuration) {
 
 bool selectLora() {
 
-  ledcWrite(1, 24);
-
   if (e32ttl) {
     delete e32ttl;
     e32ttl = nullptr;
@@ -2219,8 +2202,6 @@ bool selectLora() {
   drainUartRx(Serial2);
 
   configuration433();
-
-  ledcWrite(1, 0);
 
   return ebyte32;
 }
@@ -2314,9 +2295,7 @@ void ledUpdate(void* arg) {
   (void)arg;
 
   for (;;) {
-    ledcWrite(0, 24);
     vTaskDelay(pdMS_TO_TICKS(100));
-    ledcWrite(0, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 
@@ -2640,14 +2619,14 @@ void setup() {
   bluetoothLESetup();
 
   if (digitalRead(CONFIG) == 0) {
-    ledcWrite(0, 24);
+    digitalWrite(pinToLED01, 1);
     while (true);
   } else {
-    ledcWrite(0, 0);
+    digitalWrite(pinToLED01, 0);
   }
 
   xTaskCreate(setLED, "setLED", 2048, NULL, 1, &setLEDHandle);
-
+  
   delay(1000);
 
   if (_ADDL == -1 || _ADDH == -1 || _CHANNEL == -1.0) {
