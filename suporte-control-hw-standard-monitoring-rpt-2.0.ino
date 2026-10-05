@@ -53,6 +53,11 @@ using namespace std;
 #define IN0 0
 #define IN1 1
 #define IN2 2
+#define IN3 3
+#define IN4 4
+#define IN5 5
+#define IN6 6
+#define IN7 7
 
 //To RS 485
 #define pinTo_RE_DE_485 GPIO_NUM_33
@@ -349,7 +354,7 @@ uint16_t _HYDRO_TAIL = 0;
 String pathHTTPClient = "http://200.98.81.127:3000/";  //PRODUÇÃO
 //String pathHTTPClient = "http://localhost:3000/"; //DESENVOLVIMENTO LOCAL
 
-#define FIRMWARE_VERSION "2.0.1"
+#define FIRMWARE_VERSION "2.1.2"
 const char FIRMWARE_VERSION_DATA[] = "SC-FW-VERSION:" FIRMWARE_VERSION;
 
 String _MODEL = "RPT";
@@ -2390,6 +2395,11 @@ void sendE32() {
     (_BIT_IN[IN0] == 1) ? message += "1," : message += "0,";
     (_BIT_IN[IN1] == 1) ? message += "1," : message += "0,";
     (_BIT_IN[IN2] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN3] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN4] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN5] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN6] == 1) ? message += "1," : message += "0,";
+    (_BIT_IN[IN7] == 1) ? message += "1," : message += "0,";
     message += String(_CURRENT_HYDROMETER_PULSES_PER_M3);
     message += ",";
     message += String(_CURRENT_HYDROMETER, 2);
@@ -2408,8 +2418,8 @@ void sendE32() {
 
   if (encodeMessage(message, packet, packetLen)) {
 
-    //Serial.print("message: ");
-    //Serial.print(String(message) + "\n");
+    // Serial.print("message: ");
+    // Serial.print(String(message) + "\n");
 
     ResponseStatus rs = e32ttl->sendFixedMessage(_ADDH, _ADDL, channel, packet, packetLen);
 
