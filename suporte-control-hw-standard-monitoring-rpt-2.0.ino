@@ -351,10 +351,10 @@ uint32_t _HYDRO_PULSE_TIME[HYDRO_MAX_PULSES];
 uint16_t _HYDRO_HEAD = 0;
 uint16_t _HYDRO_TAIL = 0;
 
-String pathHTTPClient = "http://200.98.81.127:3000/";  //PRODUÇÃO
+String pathHTTPClient = "http://200.98.80.39:3000/";  //PRODUÇÃO
 //String pathHTTPClient = "http://localhost:3000/"; //DESENVOLVIMENTO LOCAL
 
-#define FIRMWARE_VERSION "2.1.2"
+#define FIRMWARE_VERSION "2.1.3"
 const char FIRMWARE_VERSION_DATA[] = "SC-FW-VERSION:" FIRMWARE_VERSION;
 
 String _MODEL = "RPT";
